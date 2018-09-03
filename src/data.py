@@ -1,3 +1,4 @@
+# THIS FILE IS FOR EXPERIMENTS, USE image_iter.py FOR NORMAL IMAGE LOADING.
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -6,6 +7,8 @@ import os
 import random
 import logging
 import sys
+import numbers
+import math
 import sklearn
 import datetime
 import numpy as np
@@ -56,7 +59,8 @@ class FaceImageIter(io.DataIter):
     def __init__(self, batch_size, data_shape,
                  path_imgrec = None,
                  shuffle=False, aug_list=None, mean = None,
-                 rand_mirror = False,
+                 rand_mirror = False, cutoff = 0,
+                 c2c_threshold = 0.0, output_c2c = 0, c2c_mode = -10, limit = 0,
                  ctx_num = 0, images_per_identity = 0, data_extra = None, hard_mining = False, 
                  triplet_params = None, coco_mode = False,
                  mx_model = None,
@@ -70,26 +74,147 @@ class FaceImageIter(io.DataIter):
             self.imgrec = recordio.MXIndexedRecordIO(path_imgidx, path_imgrec, 'r')  # pylint: disable=redefined-variable-type
             s = self.imgrec.read_idx(0)
             header, _ = recordio.unpack(s)
+            self.idx2cos = {}
+            self.idx2flag = {}
+            self.idx2meancos = {}
+            self.c2c_auto = False
+            #if output_c2c or c2c_threshold>0.0 or c2c_mode>=-5:
+            #  path_c2c = os.path.join(os.path.dirname(path_imgrec), 'c2c')
+            #  print(path_c2c)
+            #  if os.path.exists(path_c2c):
+            #    for line in open(path_c2c, 'r'):
+            #      vec = line.strip().split(',')
+            #      idx = int(vec[0])
+            #      self.idx2cos[idx] = float(vec[1])
+            #      self.idx2flag[idx] = 1
+            #      if len(vec)>2:
+            #        self.idx2flag[idx] = int(vec[2])
+            #  else:
+            #    self.c2c_auto = True
+            #    self.c2c_step = 10000
             if header.flag>0:
               print('header0 label', header.label)
               self.header0 = (int(header.label[0]), int(header.label[1]))
               #assert(header.flag==1)
               self.imgidx = range(1, int(header.label[0]))
+              if c2c_mode==0:
+                imgidx2 = []
+                for idx in self.imgidx:
+                  c = self.idx2cos[idx]
+                  f = self.idx2flag[idx]
+                  if f!=1:
+                    continue
+                  imgidx2.append(idx)
+                print('idx count', len(self.imgidx), len(imgidx2))
+                self.imgidx = imgidx2
+              elif c2c_mode==1:
+                imgidx2 = []
+                tmp = []
+                for idx in self.imgidx:
+                  c = self.idx2cos[idx]
+                  f = self.idx2flag[idx]
+                  if f==1:
+                    imgidx2.append(idx)
+                  else:
+                    tmp.append( (idx, c) )
+                tmp = sorted(tmp, key = lambda x:x[1])
+                tmp = tmp[250000:300000]
+                for _t in tmp:
+                  imgidx2.append(_t[0])
+                print('idx count', len(self.imgidx), len(imgidx2))
+                self.imgidx = imgidx2
+              elif c2c_mode==2:
+                imgidx2 = []
+                tmp = []
+                for idx in self.imgidx:
+                  c = self.idx2cos[idx]
+                  f = self.idx2flag[idx]
+                  if f==1:
+                    imgidx2.append(idx)
+                  else:
+                    tmp.append( (idx, c) )
+                tmp = sorted(tmp, key = lambda x:x[1])
+                tmp = tmp[200000:300000]
+                for _t in tmp:
+                  imgidx2.append(_t[0])
+                print('idx count', len(self.imgidx), len(imgidx2))
+                self.imgidx = imgidx2
+              elif c2c_mode==-2:
+                imgidx2 = []
+                for idx in self.imgidx:
+                  c = self.idx2cos[idx]
+                  f = self.idx2flag[idx]
+                  if f==2:
+                    continue
+                  if c<0.73:
+                    continue
+                  imgidx2.append(idx)
+                print('idx count', len(self.imgidx), len(imgidx2))
+                self.imgidx = imgidx2
+              elif c2c_threshold>0.0:
+                imgidx2 = []
+                for idx in self.imgidx:
+                  c = self.idx2cos[idx]
+                  f = self.idx2flag[idx]
+                  if c<c2c_threshold:
+                    continue
+                  imgidx2.append(idx)
+                print(len(self.imgidx), len(imgidx2))
+                self.imgidx = imgidx2
               self.id2range = {}
               self.seq_identity = range(int(header.label[0]), int(header.label[1]))
+              c2c_stat = [0,0]
               for identity in self.seq_identity:
                 s = self.imgrec.read_idx(identity)
                 header, _ = recordio.unpack(s)
-                #print('flag', header.flag)
-                #print(header.label)
-                #assert(header.flag==2)
-                self.id2range[identity] = (int(header.label[0]), int(header.label[1]))
+                a,b = int(header.label[0]), int(header.label[1])
+                self.id2range[identity] = (a,b)
+                count = b-a
+                if count>=output_c2c:
+                  c2c_stat[1]+=1
+                else:
+                  c2c_stat[0]+=1
+                for ii in xrange(a,b):
+                  self.idx2flag[ii] = count
+                if len(self.idx2cos)>0:
+                  m = 0.0
+                  for ii in xrange(a,b):
+                    m+=self.idx2cos[ii]
+                  m/=(b-a)
+                  for ii in xrange(a,b):
+                    self.idx2meancos[ii] = m
+                  #self.idx2meancos[identity] = m
+
               print('id2range', len(self.id2range))
+              print(len(self.idx2cos), len(self.idx2meancos), len(self.idx2flag))
+              print('c2c_stat', c2c_stat)
+              if limit>0 and limit<len(self.imgidx):
+                random.seed(727)
+                prob = float(limit)/len(self.imgidx)
+                new_imgidx = []
+                new_ids = 0
+                for identity in self.seq_identity:
+                  s = self.imgrec.read_idx(identity)
+                  header, _ = recordio.unpack(s)
+                  a,b = int(header.label[0]), int(header.label[1])
+                  found = False
+                  for _idx in xrange(a,b):
+                    if random.random()<prob:
+                      found = True
+                      new_imgidx.append(_idx)
+                  if found:
+                    new_ids+=1
+                self.imgidx = new_imgidx
+                print('new ids', new_ids)
+                random.seed(None)
+                #random.Random(727).shuffle(self.imgidx)
+                #self.imgidx = self.imgidx[0:limit]
             else:
               self.imgidx = list(self.imgrec.keys)
             if shuffle:
               self.seq = self.imgidx
               self.oseq = self.imgidx
+              print(len(self.seq))
             else:
               self.seq = None
 
@@ -107,9 +232,12 @@ class FaceImageIter(io.DataIter):
         self.image_size = '%d,%d'%(data_shape[1],data_shape[2])
         self.rand_mirror = rand_mirror
         print('rand_mirror', rand_mirror)
+        self.cutoff = cutoff
         #self.cast_aug = mx.image.CastAug()
         #self.color_aug = mx.image.ColorJitterAug(0.4, 0.4, 0.4)
         self.ctx_num = ctx_num 
+        self.c2c_threshold = c2c_threshold
+        self.output_c2c = output_c2c
         self.per_batch_size = int(self.batch_size/self.ctx_num)
         self.images_per_identity = images_per_identity
         if self.images_per_identity>0:
@@ -131,9 +259,13 @@ class FaceImageIter(io.DataIter):
         self.triplet_mode = False
         self.coco_mode = coco_mode
         if len(label_name)>0:
-          self.provide_label = [(label_name, (batch_size,))]
+          if output_c2c:
+            self.provide_label = [(label_name, (batch_size,2))]
+          else:
+            self.provide_label = [(label_name, (batch_size,))]
         else:
           self.provide_label = []
+        print(self.provide_label[0][1])
         if self.coco_mode:
           assert self.triplet_params is None
           assert self.images_per_identity>0
@@ -151,6 +283,7 @@ class FaceImageIter(io.DataIter):
           self.triplet_oseq_reset()
           self.seq_min_size = self.batch_size*2
         self.cur = 0
+        self.nbatch = 0
         self.is_init = False
         self.times = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         #self.reset()
@@ -530,10 +663,63 @@ class FaceImageIter(io.DataIter):
       #    for i in xrange(self.images_per_identity):
       #      _idx = _list[i%len(_list)]
       #      self.seq.append(_idx)
+    def reset_c2c(self):
+      self.select_triplets()
+      for identity,v in self.id2range.iteritems():
+        _list = range(*v)
+      
+        for idx in _list:
+          s = imgrec.read_idx(idx)
+          ocontents.append(s)
+        embeddings = None
+        #print(len(ocontents))
+        ba = 0
+        while True:
+          bb = min(ba+args.batch_size, len(ocontents))
+          if ba>=bb:
+            break
+          _batch_size = bb-ba
+          _batch_size2 = max(_batch_size, args.ctx_num)
+          data = nd.zeros( (_batch_size2,3, image_size[0], image_size[1]) )
+          label = nd.zeros( (_batch_size2,) )
+          count = bb-ba
+          ii=0
+          for i in xrange(ba, bb):
+            header, img = mx.recordio.unpack(ocontents[i])
+            img = mx.image.imdecode(img)
+            img = nd.transpose(img, axes=(2, 0, 1))
+            data[ii][:] = img
+            label[ii][:] = header.label
+            ii+=1
+          while ii<_batch_size2:
+            data[ii][:] = data[0][:]
+            label[ii][:] = label[0][:]
+            ii+=1
+          db = mx.io.DataBatch(data=(data,), label=(label,))
+          self.mx_model.forward(db, is_train=False)
+          net_out = self.mx_model.get_outputs()
+          net_out = net_out[0].asnumpy()
+          model.forward(db, is_train=False)
+          net_out = model.get_outputs()
+          net_out = net_out[0].asnumpy()
+          if embeddings is None:
+            embeddings = np.zeros( (len(ocontents), net_out.shape[1]))
+          embeddings[ba:bb,:] = net_out[0:_batch_size,:]
+          ba = bb
+        embeddings = sklearn.preprocessing.normalize(embeddings)
+        embedding = np.mean(embeddings, axis=0, keepdims=True)
+        embedding = sklearn.preprocessing.normalize(embedding)
+        sims = np.dot(embeddings, embedding).flatten()
+        assert len(sims)==len(_list)
+        for i in xrange(len(_list)):
+          _idx = _list[i]
+          self.idx2cos[_idx] = sims[i]
 
     def reset(self):
         """Resets the iterator to the beginning of the data."""
         print('call reset()')
+        if self.c2c_auto:
+          self.reset_c2c()
         self.cur = 0
         if self.images_per_identity>0:
           if self.triplet_mode:
@@ -575,17 +761,52 @@ class FaceImageIter(io.DataIter):
         """Helper function for reading in next sample."""
         #set total batch size, for example, 1800, and maximum size for each people, for example 45
         if self.seq is not None:
-          if self.cur >= len(self.seq):
-              raise StopIteration
-          idx = self.seq[self.cur]
-          self.cur += 1
-          if self.imgrec is not None:
-            s = self.imgrec.read_idx(idx)
-            header, img = recordio.unpack(s)
-            return header.label, img, None, None
-          else:
-            label, fname, bbox, landmark = self.imglist[idx]
-            return label, self.read_image(fname), bbox, landmark
+          while True:
+            if self.cur >= len(self.seq):
+                raise StopIteration
+            idx = self.seq[self.cur]
+            self.cur += 1
+            if self.imgrec is not None:
+              s = self.imgrec.read_idx(idx)
+              header, img = recordio.unpack(s)
+              label = header.label
+              if self.output_c2c:
+                count = self.idx2flag[idx]
+                if self.output_c2c==1:
+                  v = np.random.uniform(0.4, 0.5)
+                elif self.output_c2c==2:
+                  v = np.random.uniform(0.4, 0.5)
+                  if count>=self.output_c2c:
+                    v = np.random.uniform(0.3, 0.4)
+                elif self.output_c2c==3:
+                  v = (9.5 - math.log(2.0+count))/10.0
+                  v = min(max(v, 0.3), 0.5)
+                elif self.output_c2c==4:
+                  mu = 0.0
+                  sigma = 0.1
+                  mrange = [0.4,0.5]
+                  v = numpy.random.normal(mu, sigma)
+                  v = math.abs(v)*-1.0+mrange[1]
+                  v = max(v, mrange[0])
+                elif self.output_c2c==5:
+                  v = np.random.uniform(0.41, 0.51)
+                  if count>=175:
+                    v = np.random.uniform(0.37, 0.47)
+                elif self.output_c2c==6:
+                  v = np.random.uniform(0.41, 0.51)
+                  if count>=175:
+                    v = np.random.uniform(0.38, 0.48)
+                else:
+                  assert False
+
+                label = [label, v]
+              else:
+                if not isinstance(label, numbers.Number):
+                  label = label[0]
+              return label, img, None, None
+            else:
+              label, fname, bbox, landmark = self.imglist[idx]
+              return label, self.read_image(fname), bbox, landmark
         else:
             s = self.imgrec.read()
             if s is None:
@@ -640,6 +861,7 @@ class FaceImageIter(io.DataIter):
           self.is_init = True
         """Returns the next batch of data."""
         #print('in next', self.cur, self.labelcur)
+        self.nbatch+=1
         batch_size = self.batch_size
         c, h, w = self.data_shape
         batch_data = nd.empty((batch_size, c, h, w))
@@ -658,6 +880,17 @@ class FaceImageIter(io.DataIter):
                     _data = _data.astype('float32')
                     _data -= self.nd_mean
                     _data *= 0.0078125
+                if self.cutoff>0:
+                  centerh = random.randint(0, _data.shape[0]-1)
+                  centerw = random.randint(0, _data.shape[1]-1)
+                  half = self.cutoff//2
+                  starth = max(0, centerh-half)
+                  endh = min(_data.shape[0], centerh+half)
+                  startw = max(0, centerw-half)
+                  endw = min(_data.shape[1], centerw+half)
+                  _data = _data.astype('float32')
+                  #print(starth, endh, startw, endw, _data.shape)
+                  _data[starth:endh, startw:endw, :] = 127.5
                 #_npdata = _data.asnumpy()
                 #if landmark is not None:
                 #  _npdata = face_preprocess.preprocess(_npdata, bbox = bbox, landmark=landmark, image_size=self.image_size)
@@ -685,7 +918,25 @@ class FaceImageIter(io.DataIter):
                     batch_data[i][:] = self.postprocess_data(datum)
                     if self.provide_label is not None:
                       if not self.coco_mode:
-                        batch_label[i][:] = label
+                        if len(batch_label.shape)==1:
+                          batch_label[i][:] = label
+                        else:
+                          for ll in xrange(batch_label.shape[1]):
+                            v = label[ll]
+                            if ll>0:
+                              #c2c = v
+                              #_param = [0.5, 0.4, 0.85, 0.75]
+                              #_a = (_param[1]-_param[0])/(_param[3]-_param[2])
+                              #m = _param[1]+_a*(c2c-_param[3])
+                              #m = min(_param[0], max(_param[1],m))
+                              #v = math.cos(m)
+                              #v = v*v
+                              m = v
+                              v = math.cos(m)
+                              v = v*v
+                              #print('m', i,m,v)
+
+                            batch_label[i][ll] = v
                       else:
                         batch_label[i][:] = (i%self.per_batch_size)//self.images_per_identity
                     i += 1

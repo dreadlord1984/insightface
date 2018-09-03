@@ -18,6 +18,9 @@ import numpy as np
 sys.path.append(os.path.join(os.path.dirname(__file__),'..', 'common'))
 import face_image
 
+sys.path.append(os.path.join(os.path.dirname(__file__),'..', 'eval'))
+import verification
+
 def ch_dev(arg_params, aux_params, ctx):
   new_args = dict()
   new_auxs = dict()
@@ -32,6 +35,7 @@ def get_embedding(args, imgrec, id, image_size, model):
   header, _ = mx.recordio.unpack(s)
   ocontents = []
   for idx in xrange(int(header.label[0]), int(header.label[1])):
+    #print('idx', idx)
     s = imgrec.read_idx(idx)
     ocontents.append(s)
   embeddings = None
@@ -44,19 +48,20 @@ def get_embedding(args, imgrec, id, image_size, model):
     _batch_size = bb-ba
     _batch_size2 = max(_batch_size, args.ctx_num)
     data = nd.zeros( (_batch_size2,3, image_size[0], image_size[1]) )
-    label = nd.zeros( (_batch_size2,) )
+    #label = nd.zeros( (_batch_size2,) )
     count = bb-ba
     ii=0
     for i in xrange(ba, bb):
       header, img = mx.recordio.unpack(ocontents[i])
+      #print(header.label.shape, header.label)
       img = mx.image.imdecode(img)
       img = nd.transpose(img, axes=(2, 0, 1))
       data[ii][:] = img
-      label[ii][:] = header.label
+      #label[ii][:] = header.label
       ii+=1
     while ii<_batch_size2:
       data[ii][:] = data[0][:]
-      label[ii][:] = label[0][:]
+      #label[ii][:] = label[0][:]
       ii+=1
     #db = mx.io.DataBatch(data=(data,), label=(label,))
     db = mx.io.DataBatch(data=(data,))
@@ -73,34 +78,38 @@ def get_embedding(args, imgrec, id, image_size, model):
   return embedding
 
 def main(args):
-  ctx = []
-  cvd = os.environ['CUDA_VISIBLE_DEVICES'].strip()
-  if len(cvd)>0:
-    for i in xrange(len(cvd.split(','))):
-      ctx.append(mx.gpu(i))
-  if len(ctx)==0:
-    ctx = [mx.cpu()]
-    print('use cpu')
-  else:
-    print('gpu num:', len(ctx))
-  args.ctx_num = len(ctx)
   include_datasets = args.include.split(',')
   prop = face_image.load_property(include_datasets[0])
   image_size = prop.image_size
   print('image_size', image_size)
-  vec = args.model.split(',')
-  prefix = vec[0]
-  epoch = int(vec[1])
-  print('loading',prefix, epoch)
-  sym, arg_params, aux_params = mx.model.load_checkpoint(prefix, epoch)
-  #arg_params, aux_params = ch_dev(arg_params, aux_params, ctx)
-  all_layers = sym.get_internals()
-  sym = all_layers['fc1_output']
-  #model = mx.mod.Module.load(prefix, epoch, context = ctx)
-  #model.bind(data_shapes=[('data', (args.batch_size, 3, image_size[0], image_size[1]))], label_shapes=[('softmax_label', (args.batch_size,))])
-  model = mx.mod.Module(symbol=sym, context=ctx, label_names = None)
-  model.bind(data_shapes=[('data', (args.batch_size, 3, image_size[0], image_size[1]))])
-  model.set_params(arg_params, aux_params)
+  model = None
+  if len(args.model)>0:
+    ctx = []
+    cvd = os.environ['CUDA_VISIBLE_DEVICES'].strip()
+    if len(cvd)>0:
+      for i in xrange(len(cvd.split(','))):
+        ctx.append(mx.gpu(i))
+    if len(ctx)==0:
+      ctx = [mx.cpu()]
+      print('use cpu')
+    else:
+      print('gpu num:', len(ctx))
+    args.ctx_num = len(ctx)
+    vec = args.model.split(',')
+    prefix = vec[0]
+    epoch = int(vec[1])
+    print('loading',prefix, epoch)
+    sym, arg_params, aux_params = mx.model.load_checkpoint(prefix, epoch)
+    #arg_params, aux_params = ch_dev(arg_params, aux_params, ctx)
+    all_layers = sym.get_internals()
+    sym = all_layers['fc1_output']
+    #model = mx.mod.Module.load(prefix, epoch, context = ctx)
+    #model.bind(data_shapes=[('data', (args.batch_size, 3, image_size[0], image_size[1]))], label_shapes=[('softmax_label', (args.batch_size,))])
+    model = mx.mod.Module(symbol=sym, context=ctx, label_names = None)
+    model.bind(data_shapes=[('data', (args.batch_size, 3, image_size[0], image_size[1]))])
+    model.set_params(arg_params, aux_params)
+  else:
+    assert args.param1==0.0
   rec_list = []
   for ds in include_datasets:
     path_imgrec = os.path.join(ds, 'train.rec')
@@ -127,13 +136,16 @@ def main(args):
       pp+=1
       if pp%10==0:
         print('processing id', pp)
-      embedding = get_embedding(args, imgrec, identity, image_size, model)
+      if model is not None:
+        embedding = get_embedding(args, imgrec, identity, image_size, model)
+      else:
+        embedding = None
       #print(embedding.shape)
       id_list.append( [ds_id, identity, embedding] )
       if test_limit>0 and pp>=test_limit:
         break
     id_list_map[ds_id] = id_list
-    if ds_id==0:
+    if ds_id==0 or model is None:
       all_id_list += id_list
       print(ds_id, len(id_list))
     else:
@@ -177,6 +189,20 @@ def main(args):
         _id_list.append( (_ds_id, identity, embedding) )
         if test_limit>0 and pp>=test_limit:
           break
+    else:
+      _id_list = []
+      data_set = verification.load_bin(args.exclude, image_size)[0][0]
+      print(data_set.shape)
+      data = nd.zeros( (1,3,image_size[0], image_size[1]))
+      for i in xrange(data_set.shape[0]):
+        data[0] = data_set[i]
+        db = mx.io.DataBatch(data=(data,))
+        model.forward(db, is_train=False)
+        net_out = model.get_outputs()
+        embedding = net_out[0].asnumpy().flatten()
+        _norm=np.linalg.norm(embedding)
+        embedding /= _norm
+        _id_list.append( (i, i, embedding) )
 
     #X = []
     #for id_item in all_id_list:
@@ -197,19 +223,19 @@ def main(args):
     #  print(param1, exclude_removed)
     #  param1+=0.05
 
-    X = []
-    for id_item in all_id_list:
-      X.append(id_item[2])
-    X = np.array(X)
-    emap = {}
-    for id_item in _id_list:
-      y = id_item[2]
-      sim = np.dot(X, y.T)
-      idx = np.where(sim>=args.param2)[0]
-      for j in idx:
-        emap[j] = 1
-        all_id_list[j][1] = -1
-    print('exclude', len(emap))
+      X = []
+      for id_item in all_id_list:
+        X.append(id_item[2])
+      X = np.array(X)
+      emap = {}
+      for id_item in _id_list:
+        y = id_item[2]
+        sim = np.dot(X, y.T)
+        idx = np.where(sim>=args.param2)[0]
+        for j in idx:
+          emap[j] = 1
+          all_id_list[j][1] = -1
+      print('exclude', len(emap))
 
   if args.test>0:
     return
@@ -259,7 +285,7 @@ if __name__ == '__main__':
   parser.add_argument('--model', default='../model/softmax,50', help='path to load model.')
   parser.add_argument('--batch-size', default=32, type=int, help='')
   parser.add_argument('--param1', default=0.3, type=float, help='')
-  parser.add_argument('--param2', default=0.45, type=float, help='')
+  parser.add_argument('--param2', default=0.4, type=float, help='')
   parser.add_argument('--mode', default=1, type=int, help='')
   parser.add_argument('--test', default=0, type=int, help='')
   args = parser.parse_args()
